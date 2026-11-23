@@ -36,10 +36,11 @@ struct EngineError: Error, CustomStringConvertible {
 /// Talks to the phone's own developer services through the LocalDevVPN loopback tunnel
 /// and holds a DVT LocationSimulation session open.
 final class LocationEngine {
-    static let pairingURL: URL = {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("pairingFile.plist")
-    }()
+    static let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+    /// Lockdown pair record (HostID, certificates). Works up to iOS 26.
+    static let pairingURL = documents.appendingPathComponent("pairingFile.plist")
+    /// RemotePairing record (public_key, private_key, identifier). Needed on iOS 27.
+    static let rpPairingURL = documents.appendingPathComponent("rpPairingFile.plist")
 
     private let worker = WorkerThread()
     private var adapter: OpaquePointer?
@@ -48,9 +49,26 @@ final class LocationEngine {
     private var locSim: OpaquePointer?
 
     var deviceIPs = ["10.7.0.1", "10.7.0.2"]
+    static let remotePairingPort: UInt16 = 49152
 
     static var hasPairingFile: Bool {
         FileManager.default.fileExists(atPath: pairingURL.path)
+            || FileManager.default.fileExists(atPath: rpPairingURL.path)
+    }
+
+    /// Stores an imported plist under the right name, decided by its keys.
+    static func importPairing(_ data: Data) throws -> String {
+        let obj = try PropertyListSerialization.propertyList(from: data, format: nil)
+        guard let dict = obj as? [String: Any] else { throw EngineError(description: "Файл не plist-словарь") }
+        if dict["public_key"] != nil, dict["private_key"] != nil {
+            try data.write(to: rpPairingURL, options: .atomic)
+            return "RPPairing (iOS 27)"
+        }
+        if dict["HostID"] != nil || dict["HostCertificate"] != nil {
+            try data.write(to: pairingURL, options: .atomic)
+            return "Lockdown"
+        }
+        throw EngineError(description: "Это не pairing-файл")
     }
 
     func set(lat: Double, lon: Double, done: @escaping (Result<Void, EngineError>) -> Void) {
@@ -95,14 +113,67 @@ final class LocationEngine {
         guard Self.hasPairingFile else {
             return .failure(EngineError(description: "Нет pairing-файла. Импортируйте его в настройках."))
         }
-        var lastError = EngineError(description: "Нет связи с устройством")
+        var errors: [String] = []
+        let fm = FileManager.default
         for ip in deviceIPs {
-            switch connect(ip: ip) {
-            case .success: return .success(())
-            case .failure(let e): lastError = EngineError(description: "\(ip): \(e.description)")
+            if fm.fileExists(atPath: Self.rpPairingURL.path) {
+                switch connectRemotePairing(ip: ip) {
+                case .success: return .success(())
+                case .failure(let e): errors.append("\(ip) RP: \(e.description)")
+                }
+            }
+            if fm.fileExists(atPath: Self.pairingURL.path) {
+                switch connect(ip: ip) {
+                case .success: return .success(())
+                case .failure(let e): errors.append("\(ip): \(e.description)")
+                }
             }
         }
-        return .failure(lastError)
+        return .failure(EngineError(description: errors.joined(separator: "\n")))
+    }
+
+    /// iOS 27 path: RemotePairing over the VPN loopback, TLS-PSK tunnel, then RSD.
+    private func connectRemotePairing(ip: String) -> Result<Void, EngineError> {
+        disconnect()
+
+        var rpf: OpaquePointer?
+        if let err = rp_pairing_file_read(Self.rpPairingURL.path, &rpf) {
+            return .failure(Self.take(err, "RPPairing-файл"))
+        }
+        defer { rp_pairing_file_free(rpf) }
+
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = Self.remotePairingPort.bigEndian
+        inet_pton(AF_INET, ip, &addr.sin_addr)
+
+        var adp: OpaquePointer?
+        var hs: OpaquePointer?
+        let tunErr = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                tunnel_create_rppairing($0, socklen_t(MemoryLayout<sockaddr_in>.size), "GPSSpoof",
+                                        rpf, nil, nil, &adp, &hs)
+            }
+        }
+        if let err = tunErr { return .failure(Self.take(err, "Туннель (включён LocalDevVPN?)")) }
+        adapter = adp
+        handshake = hs
+
+        var rs: OpaquePointer?
+        if let err = remote_server_connect_rsd(adp, hs, &rs) {
+            disconnect()
+            return .failure(Self.take(err, "DVT (включён режим разработчика?)"))
+        }
+        remoteServer = rs
+
+        var sim: OpaquePointer?
+        if let err = location_simulation_new(rs, &sim) {
+            disconnect()
+            return .failure(Self.take(err, "LocationSimulation"))
+        }
+        locSim = sim
+        return .success(())
     }
 
     private func connect(ip: String) -> Result<Void, EngineError> {

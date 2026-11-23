@@ -17,8 +17,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.local.gpsspoof
-        MARKETING_VERSION: "1.0"
-        CURRENT_PROJECT_VERSION: "1"
+        MARKETING_VERSION: "1.1"
+        CURRENT_PROJECT_VERSION: "2"
         TARGETED_DEVICE_FAMILY: "1,2"
         SWIFT_OBJC_BRIDGING_HEADER: Sources/Bridging-Header.h
         HEADER_SEARCH_PATHS: $(SRCROOT)/Vendor
@@ -35,5 +35,9 @@ targets:
         NSLocationWhenInUseUsageDescription: Нужно, чтобы приложение работало в фоне и держало подмену.
         NSLocationAlwaysAndWhenInUseUsageDescription: Нужно, чтобы приложение работало в фоне и держало подмену.
         UIBackgroundModes: [location]
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: Pairing File
+            LSHandlerRank: Alternate
+            LSItemContentTypes: [com.apple.property-list, com.apple.xml-property-list, public.data]
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true

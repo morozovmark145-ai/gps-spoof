@@ -72,12 +72,18 @@ final class Model: ObservableObject {
         defer { if access { url.stopAccessingSecurityScopedResource() } }
         do {
             let data = try Data(contentsOf: url)
-            try data.write(to: LocationEngine.pairingURL, options: .atomic)
+            let kind = try LocationEngine.importPairing(data)
             hasPairing = true
-            report("Pairing-файл импортирован")
+            report("Импортирован: \(kind)")
+        } catch let e as EngineError {
+            report("Не удалось импортировать: \(e.description)", error: true)
         } catch {
             report("Не удалось импортировать: \(error.localizedDescription)", error: true)
         }
+    }
+
+    func refreshPairing() {
+        hasPairing = LocationEngine.hasPairingFile
     }
 
     func addFavorite(name: String) {
@@ -103,6 +109,7 @@ final class Model: ObservableObject {
 
 struct ContentView: View {
     @StateObject private var m = Model()
+    @Environment(\.scenePhase) private var scenePhase
     @State private var camera: MapCameraPosition = .region(MKCoordinateRegion(
         center: CLLocationCoordinate2D(latitude: 55.7558, longitude: 37.6173),
         span: MKCoordinateSpan(latitudeDelta: 0.2, longitudeDelta: 0.2)))
@@ -145,6 +152,8 @@ struct ContentView: View {
 
             VStack { Spacer(); bottomPanel }
         }
+        .onChange(of: scenePhase) { _, phase in if phase == .active { m.refreshPairing() } }
+        .onOpenURL { m.importPairing($0) }
         .sheet(isPresented: $showSettings) { SettingsView(m: m) }
         .sheet(isPresented: $showFavs) { favSheet }
         .alert("Координаты", isPresented: $showCoords) {
@@ -205,7 +214,8 @@ struct ContentView: View {
         VStack(spacing: 10) {
             HStack(spacing: 6) {
                 Circle().fill(m.active != nil ? .green : .gray).frame(width: 8, height: 8)
-                Text(m.status).font(.footnote).foregroundStyle(m.isError ? .red : .primary).lineLimit(3)
+                Text(m.status).font(.footnote).foregroundStyle(m.isError ? .red : .primary).lineLimit(6)
+                    .textSelection(.enabled)
                 Spacer()
                 if m.busy { ProgressView() }
             }
