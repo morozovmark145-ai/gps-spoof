@@ -1,0 +1,78 @@
+name: Build IPA
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  IDEVICE_COMMIT: c8fff6d7fb2690eaeb591ce510754effa7b1e19b
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            idevice/target
+          key: cargo-${{ env.IDEVICE_COMMIT }}
+
+      - name: Build idevice static library for iOS
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup target add aarch64-apple-ios
+          mkdir -p idevice && cd idevice
+          git init -q
+          git remote add origin https://github.com/jkcoxson/idevice 2>/dev/null || true
+          git fetch -q --depth 1 origin "$IDEVICE_COMMIT"
+          git checkout -q FETCH_HEAD
+          cd ffi
+          BINDGEN_EXTRA_CLANG_ARGS="--sysroot=$(xcrun --sdk iphoneos --show-sdk-path)" \
+          IPHONEOS_DEPLOYMENT_TARGET=17.0 \
+            cargo build --release --target aarch64-apple-ios --no-default-features --features "ring full"
+          mkdir -p "$GITHUB_WORKSPACE/Vendor"
+          cp ../target/aarch64-apple-ios/release/libidevice_ffi.a "$GITHUB_WORKSPACE/Vendor/"
+          cp idevice.h "$GITHUB_WORKSPACE/Vendor/"
+
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Build app (unsigned)
+        run: |
+          xcodebuild -project GPSSpoof.xcodeproj -scheme GPSSpoof \
+            -sdk iphoneos -configuration Release -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build | tail -n 80
+          test -d build/Build/Products/Release-iphoneos/GPSSpoof.app
+
+      - name: Package IPA
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/GPSSpoof.app Payload/
+          zip -qry GPSSpoof.ipa Payload
+          ls -lh GPSSpoof.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GPSSpoof-ipa
+          path: GPSSpoof.ipa
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: GPSSpoof build ${{ github.run_number }}
+          files: GPSSpoof.ipa
